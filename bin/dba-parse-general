@@ -1,0 +1,205 @@
+#!/usr/bin/env python2.6
+
+import argparse
+import sys
+import time
+import re
+
+class ParseGeneralLog():
+    """Main program class"""
+    opt = None
+    config = None
+    general_log_file = None
+    verbose = False
+    connections = {}
+    stats = { }
+
+    def __init__(self):
+        """Program entry point"""
+        op = argparse.ArgumentParser()
+        op.add_argument("--users", dest="stats_users", help="Show details of all users connecting to this host", nargs='?', default=argparse.SUPPRESS)
+        op.add_argument("--schemas", dest="stats_schemas", help="Show details of schema usage of this host", default=argparse.SUPPRESS, nargs='?')
+        op.add_argument("--hosts", dest="stats_hosts", help="Show details of hosts connecting to this host", default=argparse.SUPPRESS, nargs='?')
+        op.add_argument("--verbose", dest="stats_verbose", help="Show even more fine grained information per metric", default=argparse.SUPPRESS, nargs='?')
+        op.add_argument("--general-log", dest="general_log_file", help="General log file", default=False, required=True, nargs='*')
+
+        opt = op.parse_args()
+        if not opt.general_log_file:
+            print "Expected a file with the general log to be provided"
+        else:
+            self.general_log_file = opt.general_log_file
+
+        if hasattr(opt, 'stats_users'):
+            self.stats['users'] = {}
+        if hasattr(opt, 'stats_hosts'):
+            self.stats['hosts'] = {}
+        if hasattr(opt, 'stats_schemas'):
+            self.stats['schemas'] = {}
+        if hasattr(opt, 'stats_verbose'):
+            self.verbose = True
+
+        self.parse_loglines()
+        self.process_loglines()
+        self.show_stats()
+
+
+    def parse_loglines(self):
+        for log_file in self.general_log_file:
+            with open (log_file, "r") as log_file:
+                for line in log_file:
+                    match_line = re.match('^\s+([\d]+)\s+([a-zA-Z]+)\s+(.*)$', line)
+                    if match_line:
+                        if match_line.group(1) not in self.connections:
+                            self.connections[match_line.group(1)] = []
+                        if match_line.group(2) == 'Connect':
+                            match_connect = re.match('^([^@]+)@([^\s]+)\s+on\s+([^\s]*)$', match_line.group(3))
+                            if match_connect:
+                                if len(match_connect.group(3)) == 0:
+                                    self.connections[match_line.group(1)].append([match_line.group(2), match_connect.group(1), match_connect.group(2), 'None'])
+                                else:
+                                    self.connections[match_line.group(1)].append([match_line.group(2), match_connect.group(1), match_connect.group(2), match_connect.group(3)])
+                        else:
+                            self.connections[match_line.group(1)].append([match_line.group(2), match_line.group(3)])
+
+    def process_loglines(self):
+        for connection in self.connections:
+            for operation in self.connections[connection]:
+                if operation[0] == 'Connect':
+                    self.write_stats_schema(operation[3], connection)
+                    self.write_stats_host(operation[2], connection)
+                    self.write_stats_user(operation[1], connection)
+
+    def write_stats_schema(self, schema, connection):
+        if 'schemas' in self.stats:
+            if schema not in self.stats['schemas']:
+                self.stats['schemas'][schema] = {}
+                self.stats['schemas'][schema]['counts'] = 1
+                self.stats['schemas'][schema]['users'] = {}
+                self.stats['schemas'][schema]['hosts'] = {}
+            else:
+                self.stats['schemas'][schema]['counts'] += 1
+
+            if self.verbose == True:
+                for operation in self.connections[connection]:
+                    if operation[0] == 'Connect':
+                        # Calculate per users connecting to this schema
+                        if operation[1] not in self.stats['schemas'][schema]['users']:
+                            self.stats['schemas'][schema]['users'][operation[1]] = 1
+                        else:
+                            self.stats['schemas'][schema]['users'][operation[1]] += 1
+                        # Calculate per host connecting to this schema
+                        if operation[2] not in self.stats['schemas'][schema]['hosts']:
+                            self.stats['schemas'][schema]['hosts'][operation[2]] = 1
+                        else:
+                            self.stats['schemas'][schema]['hosts'][operation[2]] += 1
+
+    def write_stats_host(self, host, connection):
+        if 'hosts' in self.stats:
+            if host not in self.stats['hosts']:
+                self.stats['hosts'][host] = {}
+                self.stats['hosts'][host]['counts'] = 1
+                self.stats['hosts'][host]['users'] = {}
+                self.stats['hosts'][host]['schemas'] = {}
+            else:
+                self.stats['hosts'][host]['counts'] += 1
+
+            if self.verbose == True:
+                for operation in self.connections[connection]:
+                    if operation[0] == 'Connect':
+                        # Calculate per users connecting from this ip address
+                        if operation[1] not in self.stats['hosts'][host]['users']:
+                            self.stats['hosts'][host]['users'][operation[1]] = 1
+                        else:
+                            self.stats['hosts'][host]['users'][operation[1]] += 1
+                        # Calculate per schema connecting from this ip address
+                        if operation[3] not in self.stats['hosts'][host]['schemas']:
+                            self.stats['hosts'][host]['schemas'][operation[3]] = 1
+                        else:
+                            self.stats['hosts'][host]['schemas'][operation[3]] += 1
+
+
+    def write_stats_user(self, user, connection):
+        if 'users' in self.stats:
+            if user not in self.stats['users']:
+                self.stats['users'][user] = {}
+                self.stats['users'][user]['counts'] = 1
+                self.stats['users'][user]['hosts'] = {}
+                self.stats['users'][user]['schemas'] = {}
+            else:
+                self.stats['users'][user]['counts'] += 1
+
+            if self.verbose == True:
+                for operation in self.connections[connection]:
+                    if operation[0] == 'Connect':
+                        # Calculate hosts used per user for connecting
+                        if operation[2] not in self.stats['users'][user]['hosts']:
+                            self.stats['users'][user]['hosts'][operation[2]] = 1
+                        else:
+                            self.stats['users'][user]['hosts'][operation[2]] += 1
+                        # Calculate per user the schema usage
+                        if operation[3] not in self.stats['users'][user]['schemas']:
+                            self.stats['users'][user]['schemas'][operation[3]] = 1
+                        else:
+                            self.stats['users'][user]['schemas'][operation[3]] += 1
+
+    def show_stats(self):
+        if 'hosts' in self.stats:
+            print "=========================================="
+            print "The number of hosts connecting are: " + str(len(self.stats['hosts']))
+            print "------------------------------------------"
+            print "Per host statistics:"
+            for host in sorted(self.stats['hosts'], key=self.stats['hosts'].get, reverse=True):
+                tabs = "\t"
+                if len(host) < 14:
+                    tabs = "\t\t"
+                print " " + host + tabs + ": " + str(self.stats['hosts'][host]['counts'])
+                if self.verbose == True:
+                    print " - users:"
+                    for user in sorted(self.stats['hosts'][host]['users'], key=self.stats['hosts'][host]['users'].get, reverse=True):
+                        print "    " + user + ": " + str(self.stats['hosts'][host]['users'][user])
+                    print " - schemas:"
+                    for schema in sorted(self.stats['hosts'][host]['schemas'], key=self.stats['hosts'][host]['schemas'].get, reverse=True):
+                        print "    " + schema + ": " + str(self.stats['hosts'][host]['schemas'][schema])
+                    print " ------------------"
+
+        if 'users' in self.stats:
+            print "=========================================="
+            print "The number of users connecting are: " + str(len(self.stats['users']))
+            print "------------------------------------------"
+            print "Per user statistics:"
+            for user in sorted(self.stats['users'], key=self.stats['users'].get, reverse=True):
+                tabs = "\t"
+                if len(user) < 7:
+                    tabs = "\t\t"
+                print " " + user + tabs + ": " + str(self.stats['users'][user]['counts'])
+                if self.verbose == True:
+                    print " - schemas:"
+                    for schema in sorted(self.stats['users'][user]['schemas'], key=self.stats['users'][user]['schemas'].get, reverse=True):
+                        print "    " + schema + ": " + str(self.stats['users'][user]['schemas'][schema])
+                    print " - hosts:"
+                    for host in sorted(self.stats['users'][user]['hosts'], key=self.stats['users'][user]['hosts'].get, reverse=True):
+                        print "    " + host + ": " + str(self.stats['users'][user]['hosts'][host])
+                    print " ------------------"
+
+        if 'schemas' in self.stats:
+            print "=========================================="
+            print "The number of schemas connected to are: " + str(len(self.stats['schemas']))
+            print "------------------------------------------"
+            print "Per schema statistics:"
+            for schema in sorted(self.stats['schemas'], key=self.stats['schemas'].get, reverse=True):
+                tabs = "\t"
+                if len(schema) < 7:
+                    tabs = "\t\t"
+                print " " + schema + tabs + ": " + str(self.stats['schemas'][schema]['counts'])
+                if self.verbose == True:
+                    print " - users:"
+                    for user in sorted(self.stats['schemas'][schema]['users'], key=self.stats['schemas'][schema]['users'].get, reverse=True):
+                        print "    " + user + ": " + str(self.stats['schemas'][schema]['users'][user])
+                    print " - hosts:"
+                    for host in sorted(self.stats['schemas'][schema]['hosts'], key=self.stats['schemas'][schema]['hosts'].get, reverse=True):
+                        print "    " + host + ": " + str(self.stats['schemas'][schema]['hosts'][host])
+                    print " ------------------"
+
+if __name__ == "__main__":
+    program = ParseGeneralLog()
+
